@@ -15,12 +15,14 @@ import {
 	withFileMutationQueue,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, getCapabilities, hyperlink, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 import { constants } from "node:fs";
 import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
 
-const TOOL_DESCRIPTION = `Edit files with one text payload. The payload is either a marked row edit script or a complete Codex/apply_patch patch.
+const TOOL_DESCRIPTION = `Edit files with one marked row edit script.
 
 Row edit script format:
 [filename]
@@ -28,7 +30,7 @@ Row edit script format:
 +insert row text
 -delete row text
 
-Every non-header line must be clearly marked: file headers use [path], operations use @, inserted content rows use +, deleted content rows use -. To insert or delete a real line that starts with +, -, or @, add the row marker first (for example ++literal plus, --literal minus, +@decorator).
+Every non-header line must be clearly marked: file headers use [path], operations use @, inserted content rows use +, deleted content rows use -. To insert or delete a real line that starts with +, -, or @, add the row marker first (for example ++literal plus, --literal minus, +@decorator). Do not add unnecessary context lines to row scripts. In @REPLACE/@INS.BEFORE/@INS.AFTER, unmarked lines beginning with a space are ignored; they do not constrain matching and should only appear if accidentally produced.
 
 Supported row operations:
 @INS.PRE N       insert following + rows before 1-based line N
@@ -54,23 +56,22 @@ Examples:
 @DEL 20-23
 @APPEND
 +
-+export { foo };
-
-Patch mode: if the whole payload starts with *** Begin Patch and ends with *** End Patch, it is parsed as an apply_patch patch with fuzzy matching for update hunks.`;
++export { foo };`;
 
 const TOOL_PROMPT_SNIPPET =
-	"Edit files using one marked text script ([file], @operations, + insert rows, - delete rows) or an apply_patch patch.";
+	"Edit files using one marked row script ([file], @operations, + insert rows, - delete rows).";
 
 const TOOL_PROMPT_GUIDELINES = [
-	"Use edit for file changes when you can express them as marked row operations or a Codex/apply_patch patch.",
+	"Use edit for file changes when you can express them as marked row operations.",
 	"For edit row scripts, start each file section with [path/to/file], then use operation lines like @REPLACE, @INS.PRE N, @INS.POST N, @INS.BEFORE, @INS.AFTER, @DEL N-M, or @APPEND.",
 	"For edit row scripts, every content row must have a marker: use + for inserted rows and - for deleted rows. To insert a literal line that starts with +, -, or @, keep the + row marker and put the literal character after it.",
+	"Do not add unnecessary context lines to row scripts; only include the - rows needed to uniquely locate a replacement or insertion anchor and the + rows to insert.",
+	"In @REPLACE/@INS.BEFORE/@INS.AFTER, unmarked lines beginning with a space are ignored; do not rely on them to constrain matching.",
 	"Prefer @REPLACE with the smallest unique deleted block plus replacement rows for precise changes. @REPLACE uses pi's edit matcher: fuzzy normalization, uniqueness checks, and overlap checks all apply.",
 	"Consecutive + rows or - rows form one block; for multiple replacements, use separate @REPLACE operations or alternating +/- block pairs.",
 	"Use @INS.BEFORE/@INS.AFTER with - rows for the anchor to avoid brittle line numbers when there is a unique nearby line or block.",
 	"Use @INS.PRE/@INS.POST or @DEL only when line numbers are reliable from a recent read; line-number operations are applied sequentially in script order.",
 	"Use @DEL N-M for inclusive line ranges. @DEL N deletes one line. Multiple [file] sections are allowed in one edit call.",
-	"Alternatively, pass a complete apply_patch payload beginning with *** Begin Patch and ending with *** End Patch.",
 ];
 
 const unifiedEditSchema = {
@@ -164,14 +165,24 @@ type RenderContext<TState> = {
 	invalidate: () => void;
 	argsComplete: boolean;
 	isError: boolean;
+	args?: unknown;
+	lastComponent?: Component;
 };
 
 type Preview = { diff: string; files: string[]; firstChangedLine?: number } | { error: string };
+
+type UnifiedEditCallRenderComponent = Box & {
+	preview?: Preview;
+	previewArgsKey?: string;
+	previewPending?: boolean;
+	settledError?: boolean;
+};
 
 type UnifiedRenderState = {
 	planKey?: string;
 	preview?: Preview;
 	pending?: boolean;
+	callComponent?: UnifiedEditCallRenderComponent;
 };
 
 function prepareUnifiedArguments(args: unknown): UnifiedEditParams {
@@ -641,6 +652,14 @@ function parseRowScript(text: string): RawFileScript[] {
 			const lastGroup = currentOp.groups[currentOp.groups.length - 1];
 			if (lastGroup && lastGroup.marker === marker) lastGroup.lines.push(body);
 			else currentOp.groups.push({ marker, lines: [body] });
+			continue;
+		}
+
+		if (raw.startsWith(" ") && currentOp && "groups" in currentOp) {
+			// Accept accidental unified-diff context rows inside block-oriented row
+			// operations.  They are intentionally ignored rather than used for
+			// matching; the actual - anchor/replacement block still has to be unique.
+			requireFile(lineNumber);
 			continue;
 		}
 
@@ -1141,7 +1160,7 @@ async function applyPlan(plan: ParsedPlan, signal?: AbortSignal): Promise<Unifie
 }
 
 function combineDetails(files: UnifiedEditDetails["files"]): UnifiedEditDetails {
-	const diff = files.map((file) => `File: ${file.path}\n${file.details.diff}`).join("\n\n");
+	const diff = files.length === 1 ? files[0].details.diff : files.map((file) => `File: ${file.path}\n${file.details.diff}`).join("\n\n");
 	const patch = files.map((file) => file.details.patch).join("\n");
 	const firstChangedLine = files.find((file) => file.details.firstChangedLine !== undefined)?.details.firstChangedLine;
 	return { diff, patch, firstChangedLine, files };
@@ -1173,20 +1192,153 @@ function previewForPlan(plan: ParsedPlan): Preview {
 	return { diff: details.diff, files: plan.changes.map((change) => change.path), firstChangedLine: details.firstChangedLine };
 }
 
-function renderHeader(theme: any, body?: string, isError = false): Component {
-	const title = theme.fg("toolTitle", theme.bold("edit"));
-	const suffix = body ? ` ${isError ? theme.fg("error", body) : theme.fg("muted", body)}` : "";
-	return new Text(`${title}${suffix}`, 0, 0);
+function str(value: unknown): string | null {
+	if (typeof value === "string") return value;
+	if (value == null) return "";
+	return null;
 }
 
-function renderDiffView(theme: any, headerBody: string, diff: string): Component {
-	const container = new Container();
-	container.addChild(renderHeader(theme, headerBody));
-	if (diff) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(renderDiff(diff) || theme.fg("muted", "(no diff)"), 0, 0));
+function shortenPath(path: unknown): string {
+	if (typeof path !== "string") return "";
+	const home = homedir();
+	if (path.startsWith(home)) return `~${path.slice(home.length)}`;
+	return path;
+}
+
+function linkPath(styledText: string, rawPath: string, cwd: string): string {
+	if (!getCapabilities().hyperlinks) return styledText;
+	return hyperlink(styledText, pathToFileURL(resolveToCwd(cwd, rawPath)).href);
+}
+
+function renderToolPath(rawPath: string | null, theme: any, cwd: string, options?: { emptyFallback?: string }): string {
+	if (rawPath === null) return theme.fg("error", "[invalid arg]");
+	const value = rawPath || options?.emptyFallback;
+	if (!value) return theme.fg("toolOutput", "...");
+	return linkPath(theme.fg("accent", shortenPath(value)), value, cwd);
+}
+
+function uniquePaths(paths: string[]): string[] {
+	return Array.from(new Set(paths));
+}
+
+function getRenderablePaths(text: string | undefined): string[] | undefined {
+	if (!text) return undefined;
+	try {
+		if (isPatchPayload(text)) {
+			return uniquePaths(parsePatch(text).map((op) => op.path));
+		}
+		return uniquePaths(parseRowScript(text).map((script) => script.path));
+	} catch {
+		return undefined;
 	}
-	return container;
+}
+
+function renderUnifiedPathLabel(paths: string[] | undefined, theme: any, cwd: string): string {
+	if (!paths || paths.length === 0) return renderToolPath("", theme, cwd);
+	if (paths.length === 1) return renderToolPath(str(paths[0]), theme, cwd);
+	return theme.fg("accent", `${paths.length} files`);
+}
+
+function formatUnifiedEditCall(text: string | undefined, preview: Preview | undefined, theme: any, cwd: string): string {
+	const title = theme.fg("toolTitle", theme.bold("edit"));
+	const paths = preview && !("error" in preview) ? preview.files : getRenderablePaths(text);
+	return `${title} ${renderUnifiedPathLabel(paths, theme, cwd)}`;
+}
+
+function createUnifiedEditCallRenderComponent(): UnifiedEditCallRenderComponent {
+	return Object.assign(new Box(1, 1, (text: string) => text), {
+		preview: undefined as Preview | undefined,
+		previewArgsKey: undefined as string | undefined,
+		previewPending: false,
+		settledError: false,
+	});
+}
+
+function getUnifiedEditCallRenderComponent(
+	state: UnifiedRenderState,
+	lastComponent: unknown,
+): UnifiedEditCallRenderComponent {
+	if (lastComponent instanceof Box) {
+		const component = lastComponent as UnifiedEditCallRenderComponent;
+		state.callComponent = component;
+		return component;
+	}
+	if (state.callComponent) return state.callComponent;
+	const component = createUnifiedEditCallRenderComponent();
+	state.callComponent = component;
+	return component;
+}
+
+function getUnifiedEditHeaderBg(
+	preview: Preview | undefined,
+	settledError: boolean | undefined,
+	theme: any,
+): (text: string) => string {
+	if (preview) {
+		if ("error" in preview) return (text: string) => theme.bg("toolErrorBg", text);
+		return (text: string) => theme.bg("toolSuccessBg", text);
+	}
+	if (settledError) return (text: string) => theme.bg("toolErrorBg", text);
+	return (text: string) => theme.bg("toolPendingBg", text);
+}
+
+function setUnifiedEditPreview(
+	component: UnifiedEditCallRenderComponent,
+	preview: Preview,
+	argsKey: string | undefined,
+): boolean {
+	const current = component.preview;
+	const changed =
+		current === undefined ||
+		("error" in current && "error" in preview
+			? current.error !== preview.error
+			: "error" in current !== "error" in preview) ||
+		(!("error" in current) &&
+			!("error" in preview) &&
+			(current.diff !== preview.diff ||
+				current.firstChangedLine !== preview.firstChangedLine ||
+				current.files.join("\0") !== preview.files.join("\0")));
+	component.preview = preview;
+	component.previewArgsKey = argsKey;
+	component.previewPending = false;
+	return changed;
+}
+
+function buildUnifiedEditCallComponent(
+	component: UnifiedEditCallRenderComponent,
+	text: string | undefined,
+	theme: any,
+	cwd: string,
+): UnifiedEditCallRenderComponent {
+	component.setBgFn(getUnifiedEditHeaderBg(component.preview, component.settledError, theme));
+	component.clear();
+	component.addChild(new Text(formatUnifiedEditCall(text, component.preview, theme, cwd), 0, 0));
+
+	if (!component.preview) return component;
+
+	const body = "error" in component.preview ? theme.fg("error", component.preview.error) : renderDiff(component.preview.diff);
+	component.addChild(new Spacer(1));
+	component.addChild(new Text(body, 0, 0));
+	return component;
+}
+
+function formatUnifiedEditResult(
+	preview: Preview | undefined,
+	result: { content: ToolContent; details?: UnifiedEditDetails },
+	theme: any,
+	isError: boolean,
+): string | undefined {
+	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
+	const previewError = preview && "error" in preview ? preview.error : undefined;
+	if (isError) {
+		const errorText = result.content.map((item) => item.text || "").join("\n");
+		if (!errorText || errorText === previewError) return undefined;
+		return theme.fg("error", errorText);
+	}
+
+	const resultDiff = result.details?.diff;
+	if (resultDiff && resultDiff !== previewDiff) return renderDiff(resultDiff);
+	return undefined;
 }
 
 export default function unifiedEditExtension(pi: ExtensionAPI) {
@@ -1214,44 +1366,69 @@ export default function unifiedEditExtension(pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme, context: RenderContext<UnifiedRenderState>) {
+			const component = getUnifiedEditCallRenderComponent(context.state, context.lastComponent);
 			const prepared = prepareUnifiedArguments(args);
-			const text = typeof prepared.text === "string" ? prepared.text : undefined;
+			const text = prepared && typeof prepared.text === "string" ? prepared.text : undefined;
 			const key = text === undefined ? undefined : `${context.cwd}\0${text}`;
-			if (context.state.planKey !== key) {
-				context.state.planKey = key;
-				context.state.preview = undefined;
-				context.state.pending = false;
+			if (component.previewArgsKey !== key) {
+				component.preview = undefined;
+				component.previewArgsKey = key;
+				component.previewPending = false;
+				component.settledError = false;
 			}
 
-			if (!text) return renderHeader(theme);
-			if (context.argsComplete && !context.state.preview && !context.state.pending) {
-				context.state.pending = true;
+			if (context.argsComplete && text && !component.preview && !component.previewPending) {
+				component.previewPending = true;
+				const requestKey = key;
 				void buildPlan(text, context.cwd)
 					.then((plan): Preview => previewForPlan(plan))
 					.catch((err): Preview => ({ error: err instanceof Error ? err.message : String(err) }))
 					.then((preview) => {
-						if (context.state.planKey === key) {
-							context.state.preview = preview;
-							context.state.pending = false;
+						if (component.previewArgsKey === requestKey) {
+							setUnifiedEditPreview(component, preview, requestKey);
 							context.invalidate();
 						}
 					});
 			}
 
-			const preview = context.state.preview;
-			if (preview) {
-				if ("error" in preview) return renderHeader(theme, preview.error, true);
-				return renderDiffView(theme, `${preview.files.length} file(s)`, preview.diff);
-			}
-			return renderHeader(theme, context.state.pending ? "preparing preview…" : undefined);
+			return buildUnifiedEditCallComponent(component, text, theme, context.cwd);
 		},
 
 		renderResult(result, _options, theme, context: RenderContext<UnifiedRenderState>) {
 			const typed = result as { content: ToolContent; details?: UnifiedEditDetails };
-			if (context.isError || !typed.details?.diff) {
-				return renderHeader(theme, typed.content.map((item) => item.text).join("\n"), context.isError);
+			const component = context.state.callComponent;
+			const prepared = prepareUnifiedArguments(context.args);
+			const text = prepared && typeof prepared.text === "string" ? prepared.text : undefined;
+			const key = text === undefined ? undefined : `${context.cwd}\0${text}`;
+			let changed = false;
+
+			if (component) {
+				if (!context.isError && typed.details?.diff) {
+					changed =
+						setUnifiedEditPreview(
+							component,
+							{
+								diff: typed.details.diff,
+								files: typed.details.files.map((file) => file.path),
+								firstChangedLine: typed.details.firstChangedLine,
+							},
+							key,
+						) || changed;
+				}
+				if (component.settledError !== context.isError) {
+					component.settledError = context.isError;
+					changed = true;
+				}
+				if (changed) buildUnifiedEditCallComponent(component, text, theme, context.cwd);
 			}
-			return renderDiffView(theme, `${typed.details.files.length} file(s)`, typed.details.diff);
+
+			const output = formatUnifiedEditResult(component?.preview, typed, theme, context.isError);
+			const resultComponent = (context.lastComponent as Container | undefined) ?? new Container();
+			resultComponent.clear();
+			if (!output) return resultComponent;
+			resultComponent.addChild(new Spacer(1));
+			resultComponent.addChild(new Text(output, 1, 0));
+			return resultComponent;
 		},
 	});
 }
