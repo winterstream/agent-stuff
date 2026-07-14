@@ -49,6 +49,7 @@ Available inside exec scripts:
 - `workspace.call(service, methodPath, params, {version})`
 - `workspace.service(service, {version})`
 - `workspace.whoAmI()`
+- Browser-compatible `btoa()` and `atob()` for Base64 encoding and decoding
 
 Optional flags:
 
@@ -115,6 +116,32 @@ do {
 
 return { currentlyInTrash: trash };
 JS
+```
+
+## Gmail drafts with Unicode
+
+Use UTF-8 Base64 for the Gmail API `raw` value. For non-ASCII subject lines (including emoji), use an RFC 2047 encoded-word header; `btoa()` only handles Latin-1 strings.
+
+```js
+const subject = 'Hello world 👋';
+const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+const rawMessage = [
+  'To: recipient@example.com',
+  `Subject: ${encodedSubject}`,
+  'MIME-Version: 1.0',
+  'Content-Type: text/html; charset="UTF-8"',
+  '',
+  '<p>Hello, world! 👋</p>',
+].join('\r\n');
+
+const gmail = google.gmail({ version: 'v1', auth });
+const draft = await gmail.users.drafts.create({
+  userId: 'me',
+  requestBody: {
+    message: { raw: Buffer.from(rawMessage, 'utf8').toString('base64url') },
+  },
+});
+return { draftId: draft.data.id };
 ```
 
 ## Setup + auth

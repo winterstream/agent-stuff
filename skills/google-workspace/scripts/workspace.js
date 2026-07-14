@@ -398,6 +398,8 @@ async function cmdExec(args, options) {
 
     const context = vm.createContext({
       Buffer,
+      btoa,
+      atob,
       URL,
       URLSearchParams,
       TextEncoder,
