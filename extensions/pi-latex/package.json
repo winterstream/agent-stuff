@@ -1,0 +1,57 @@
+{
+  "name": "pi-latex",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Render a practical subset of LaTeX as portable Unicode in Pi's terminal UI",
+  "keywords": [
+    "pi-package",
+    "latex",
+    "unicode",
+    "terminal",
+    "math"
+  ],
+  "license": "MIT",
+  "bin": {
+    "pi-latex": "./bin/pi-latex.js"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "typebox": "^1.3.6"
+  }
+}
