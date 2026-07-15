@@ -66,7 +66,7 @@ Optional flags:
 5. If the user did not specify an account, run `node scripts/auth.js accounts` and choose/confirm an explicit email.
 6. If auth fails, first run `node scripts/auth.js accounts` to see known profiles.
 7. If account mismatch is possible, run `workspace.whoAmI()` in the selected profile.
-8. On 401/403/unauthorized errors, switch account (`--email ...`) or re-login that specific profile.
+8. On 401/403/unauthorized errors, or a token-refresh `fetch failed` error, re-login that specific profile with `node scripts/auth.js login --email <account@example.com>` and retry the original request.
 
 ## Unauthorized/account-switch playbook
 
