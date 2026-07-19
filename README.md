@@ -29,6 +29,7 @@ Skills live in [`skills`](skills). Each skill has a `SKILL.md` plus any helper s
 - [`/github`](skills/github) - Use the `gh` CLI for GitHub issues, pull requests, runs, and API queries.
 - [`/google-workspace`](skills/google-workspace) - Access Drive, Docs, Calendar, Gmail, Sheets, Slides, Chat, and People APIs through local helper scripts.
 - [`/librarian`](skills/librarian) - Cache and refresh remote git repositories under `~/.cache/checkouts/<host>/<org>/<repo>`.
+- [`/mermaid-render`](skills/mermaid-render) - Render supported Mermaid diagrams as Unicode terminal art for inline source or documentation embeds.
 - [`/native-web-search`](skills/native-web-search) - Trigger native web search with concise summaries and source URLs.
 - [`/oebb-scotty`](skills/oebb-scotty) - Plan Austrian rail journeys and check ÖBB Scotty station departures, arrivals, trips, and disruptions.
 - [`/openscad`](skills/openscad) - Create/render OpenSCAD models, preview angles, extract parameters, validate syntax, and export STL files.

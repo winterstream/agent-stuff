@@ -29,7 +29,8 @@
     ]
   },
   "dependencies": {
-    "diff": "^8.0.2"
+    "diff": "^8.0.2",
+    "pi-grok-mermaid": "^0.1.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
