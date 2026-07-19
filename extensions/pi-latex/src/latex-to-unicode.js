@@ -7,7 +7,7 @@ const COMMANDS = {
   Upsilon: "Υ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
   cdot: "·", times: "×", div: "÷", pm: "±", mp: "∓", minus: "−", plusminus: "±",
   le: "≤", leq: "≤", ge: "≥", geq: "≥", neq: "≠", ne: "≠", approx: "≈", sim: "∼",
-  equiv: "≡", propto: "∝", infty: "∞", partial: "∂", nabla: "∇", ell: "ℓ",
+  equiv: "≡", propto: "∝", mid: "∣", infty: "∞", partial: "∂", nabla: "∇", ell: "ℓ",
   sum: "∑", prod: "∏", int: "∫", iint: "∬", oint: "∮", sqrt: "√",
   to: "→", rightarrow: "→", leftarrow: "←", leftrightarrow: "↔", mapsto: "↦",
   implies: "⇒", iff: "⇔", in: "∈", notin: "∉", subset: "⊂", subseteq: "⊆",
@@ -42,7 +42,7 @@ class Parser {
     const result = this.expression();
     return result
       .replace(/\s+/g, " ")
-      .replace(/\s*([=×·÷≤≥≠≈→←↔])\s*/g, " $1 ")
+      .replace(/\s*([=×·÷≤≥≠≈∣→←↔])\s*/g, " $1 ")
       .replace(/\s+\+\s+/g, " + ")
       .replace(/\s+-\s+/g, " − ")
       .replace(/ {2,}/g, " ")

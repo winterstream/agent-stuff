@@ -18,6 +18,10 @@ test("handles common symbols, fractions, roots, and display delimiters", () => {
   assert.equal(latexToUnicode(String.raw`\[\frac{\alpha + 1}{\sqrt{x}} \leq \infty\]`), "(α + 1)⁄(√(x)) ≤ ∞");
 });
 
+test("renders conditional bars as a mathematical relation", () => {
+  assert.equal(latexToUnicode(String.raw`P(A\mid B)`), "P(A ∣ B)");
+})
+
 test("preserves unknown commands so formula meaning is never silently lost", () => {
   assert.equal(latexToUnicode(String.raw`\operatorname{log}(x) + \unknown`), "log(x) + \\unknown");
 });
