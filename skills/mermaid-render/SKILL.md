@@ -10,7 +10,8 @@ description:
 Use `./render-mermaid.mjs` when the user wants a rendered Mermaid diagram
 embedded as text rather than a `mermaid` fenced block. It reuses the terminal
 renderer from `pi-grok-mermaid` and writes only Unicode diagram text to standard
-output.
+output. Use `./sync-rendered-mermaid.mjs` to insert or update generated renders
+in text files.
 
 ## Supported diagrams
 
@@ -44,12 +45,35 @@ printf 'flowchart LR\n  Source --> Rendered\n' \
 
 1. Render the diagram to a temporary file or capture its stdout.
 2. Inspect the complete rendered output before editing.
-3. Embed it using syntax appropriate for the destination:
-   - Markdown: a `text` fenced block.
-   - Source code: one comment prefix on every rendered line.
-   - Plain text: insert it directly.
+3. Embed it in a `rendered-mermaid` fenced block. For source code, apply the
+   source Mermaid block's existing line prefix to every generated line.
 4. Preserve the original Mermaid source when it remains useful to edit the
    diagram later; rendered Unicode art is not a maintainable diagram format.
+
+## Synchronise rendered blocks
+
+`sync-rendered-mermaid.mjs` finds Mermaid fences in one or more text files and
+ensures each is followed by an exact generated `rendered-mermaid` fence. It
+updates only explicitly marked `rendered-mermaid` blocks.
+
+The script derives the common prefix from the Mermaid block itself. Thus a block
+whose lines begin with `# ` or `// ` produces correctly prefixed generated
+output without language-specific comment parsing.
+
+Preview stale or missing blocks without changing files:
+
+```sh
+node ./sync-rendered-mermaid.mjs --width 120 --check README.md src/example.py
+```
+
+Write updates after review:
+
+```sh
+node ./sync-rendered-mermaid.mjs --width 120 --write README.md src/example.py
+```
+
+`--check` exits non-zero when a file needs updating. Exactly one of `--check` or
+`--write` is required.
 
 Do not claim that this creates an image, data URI, SVG, or PNG. For those
 formats, use a dedicated Mermaid SVG/PNG renderer instead.
