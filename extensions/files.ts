@@ -1,7 +1,7 @@
 /**
  * Files Extension
  *
- * /files command lists files in the current git tree (plus session-referenced files)
+ * /files command lists files in the current Jujutsu or Git tree (plus session-referenced files)
  * and offers quick actions like reveal, open, edit, or diff.
  * /diff is kept as an alias to the same picker.
  */
@@ -60,10 +60,15 @@ type FileEntry = {
 	lastTimestamp: number;
 };
 
-type GitStatusEntry = {
+type VcsStatusEntry = {
 	status: string;
 	exists: boolean;
 	isDirectory: boolean;
+};
+
+type Repository = {
+	kind: "jj" | "git";
+	root: string;
 };
 
 type FileToolName = "write" | "edit";
@@ -375,18 +380,18 @@ const collectSessionFileChanges = (entries: SessionEntry[], cwd: string): Map<st
 
 const splitNullSeparated = (value: string): string[] => value.split("\0").filter(Boolean);
 
-const getGitRoot = async (pi: ExtensionAPI, cwd: string): Promise<string | null> => {
-	const result = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd });
-	if (result.code !== 0) {
-		return null;
-	}
+const getRepository = async (pi: ExtensionAPI, cwd: string): Promise<Repository | null> => {
+	const jjResult = await pi.exec("jj", ["root"], { cwd });
+	const jjRoot = jjResult.stdout.trim();
+	if (jjResult.code === 0 && jjRoot) return { kind: "jj", root: jjRoot };
 
-	const root = result.stdout.trim();
-	return root ? root : null;
+	const gitResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd });
+	const gitRoot = gitResult.stdout.trim();
+	return gitResult.code === 0 && gitRoot ? { kind: "git", root: gitRoot } : null;
 };
 
-const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<string, GitStatusEntry>> => {
-	const statusMap = new Map<string, GitStatusEntry>();
+const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<string, VcsStatusEntry>> => {
+	const statusMap = new Map<string, VcsStatusEntry>();
 	const statusResult = await pi.exec("git", ["status", "--porcelain=1", "-z"], { cwd });
 	if (statusResult.code !== 0 || !statusResult.stdout) {
 		return statusMap;
@@ -416,6 +421,35 @@ const getGitStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<strin
 	}
 
 	return statusMap;
+};
+
+const getJjStatusMap = async (pi: ExtensionAPI, cwd: string): Promise<Map<string, VcsStatusEntry>> => {
+	const statusMap = new Map<string, VcsStatusEntry>();
+	const result = await pi.exec("jj", ["diff", "--summary", "-r", "@"], { cwd });
+	if (result.code !== 0 || !result.stdout) return statusMap;
+
+	for (const line of result.stdout.split("\n")) {
+		const match = line.match(/^([ADM]) (.+)$/);
+		if (!match) continue;
+		const [, status, filePath] = match;
+		const canonical = toCanonicalPathMaybeMissing(path.resolve(cwd, filePath));
+		if (canonical) statusMap.set(canonical.canonicalPath, { status, exists: canonical.exists, isDirectory: canonical.isDirectory });
+	}
+	return statusMap;
+};
+
+const getJjFiles = async (pi: ExtensionAPI, jjRoot: string): Promise<{ tracked: Set<string>; files: Array<{ canonicalPath: string; isDirectory: boolean }> }> => {
+	const tracked = new Set<string>();
+	const files: Array<{ canonicalPath: string; isDirectory: boolean }> = [];
+	const result = await pi.exec("jj", ["file", "list", "-r", "@"], { cwd: jjRoot });
+	if (result.code !== 0 || !result.stdout) return { tracked, files };
+	for (const relativePath of result.stdout.split("\n").filter(Boolean)) {
+		const canonical = toCanonicalPath(path.resolve(jjRoot, relativePath));
+		if (!canonical) continue;
+		tracked.add(canonical.canonicalPath);
+		files.push(canonical);
+	}
+	return { tracked, files };
 };
 
 const getGitFiles = async (
@@ -449,18 +483,20 @@ const getGitFiles = async (
 	return { tracked, files };
 };
 
-const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ files: FileEntry[]; gitRoot: string | null }> => {
+const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<{ files: FileEntry[]; repository: Repository | null }> => {
 	const entries = ctx.sessionManager.getBranch();
 	const sessionChanges = collectSessionFileChanges(entries, ctx.cwd);
-	const gitRoot = await getGitRoot(pi, ctx.cwd);
-	const statusMap = gitRoot ? await getGitStatusMap(pi, gitRoot) : new Map<string, GitStatusEntry>();
+	const repository = await getRepository(pi, ctx.cwd);
+	const statusMap = repository
+		? repository.kind === "jj" ? await getJjStatusMap(pi, repository.root) : await getGitStatusMap(pi, repository.root)
+		: new Map<string, VcsStatusEntry>();
 
 	let trackedSet = new Set<string>();
-	let gitFiles: Array<{ canonicalPath: string; isDirectory: boolean }> = [];
-	if (gitRoot) {
-		const gitListing = await getGitFiles(pi, gitRoot);
-		trackedSet = gitListing.tracked;
-		gitFiles = gitListing.files;
+	let repositoryFiles: Array<{ canonicalPath: string; isDirectory: boolean }> = [];
+	if (repository) {
+		const listing = repository.kind === "jj" ? await getJjFiles(pi, repository.root) : await getGitFiles(pi, repository.root);
+		trackedSet = listing.tracked;
+		repositoryFiles = listing.files;
 	}
 
 	const fileMap = new Map<string, FileEntry>();
@@ -500,7 +536,7 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		});
 	};
 
-	for (const file of gitFiles) {
+	for (const file of repositoryFiles) {
 		upsertFile({
 			canonicalPath: file.canonicalPath,
 			resolvedPath: file.canonicalPath,
@@ -518,9 +554,9 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		}
 
 		const inRepo =
-			gitRoot !== null &&
-			!path.relative(gitRoot, canonicalPath).startsWith("..") &&
-			!path.isAbsolute(path.relative(gitRoot, canonicalPath));
+			repository !== null &&
+			!path.relative(repository.root, canonicalPath).startsWith("..") &&
+			!path.isAbsolute(path.relative(repository.root, canonicalPath));
 
 		upsertFile({
 			canonicalPath,
@@ -539,9 +575,9 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		if (!canonical) continue;
 
 		const inRepo =
-			gitRoot !== null &&
-			!path.relative(gitRoot, canonical.canonicalPath).startsWith("..") &&
-			!path.isAbsolute(path.relative(gitRoot, canonical.canonicalPath));
+			repository !== null &&
+			!path.relative(repository.root, canonical.canonicalPath).startsWith("..") &&
+			!path.isAbsolute(path.relative(repository.root, canonical.canonicalPath));
 
 		upsertFile({
 			canonicalPath: canonical.canonicalPath,
@@ -560,9 +596,9 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		if (!canonical) continue;
 
 		const inRepo =
-			gitRoot !== null &&
-			!path.relative(gitRoot, canonical.canonicalPath).startsWith("..") &&
-			!path.isAbsolute(path.relative(gitRoot, canonical.canonicalPath));
+			repository !== null &&
+			!path.relative(repository.root, canonical.canonicalPath).startsWith("..") &&
+			!path.isAbsolute(path.relative(repository.root, canonical.canonicalPath));
 
 		upsertFile({
 			canonicalPath: canonical.canonicalPath,
@@ -598,7 +634,7 @@ const buildFileEntries = async (pi: ExtensionAPI, ctx: ExtensionContext): Promis
 		return a.displayPath.localeCompare(b.displayPath);
 	});
 
-	return { files, gitRoot };
+	return { files, repository };
 };
 
 type EditCheckResult = {
@@ -794,19 +830,23 @@ const quickLookPath = async (pi: ExtensionAPI, ctx: ExtensionContext, target: Fi
 	}
 };
 
-const openDiff = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry, gitRoot: string | null): Promise<void> => {
-	if (!gitRoot) {
-		ctx.ui.notify("Git repository not found", "warning");
+const openDiff = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEntry, repository: Repository | null): Promise<void> => {
+	if (!repository) {
+		ctx.ui.notify("Repository not found", "warning");
 		return;
 	}
 
-	const relativePath = path.relative(gitRoot, target.resolvedPath).split(path.sep).join("/");
+	const relativePath = path.relative(repository.root, target.resolvedPath).split(path.sep).join("/");
 	const tmpDir = mkdtempSync(path.join(os.tmpdir(), "pi-files-"));
 	const tmpFile = path.join(tmpDir, path.basename(target.displayPath));
 
-	const existsInHead = await pi.exec("git", ["cat-file", "-e", `HEAD:${relativePath}`], { cwd: gitRoot });
+	const existsInHead = repository.kind === "jj"
+		? await pi.exec("jj", ["file", "show", "-r", "@-", relativePath], { cwd: repository.root })
+		: await pi.exec("git", ["cat-file", "-e", `HEAD:${relativePath}`], { cwd: repository.root });
 	if (existsInHead.code === 0) {
-		const result = await pi.exec("git", ["show", `HEAD:${relativePath}`], { cwd: gitRoot });
+		const result = repository.kind === "jj"
+			? existsInHead
+			: await pi.exec("git", ["show", `HEAD:${relativePath}`], { cwd: repository.root });
 		if (result.code !== 0) {
 			const errorMessage = result.stderr?.trim() || `Failed to diff ${target.displayPath}`;
 			ctx.ui.notify(errorMessage, "error");
@@ -823,7 +863,7 @@ const openDiff = async (pi: ExtensionAPI, ctx: ExtensionContext, target: FileEnt
 		writeFileSync(workingPath, "", "utf8");
 	}
 
-	const openResult = await pi.exec("code", ["--diff", tmpFile, workingPath], { cwd: gitRoot });
+	const openResult = await pi.exec("code", ["--diff", tmpFile, workingPath], { cwd: repository.root });
 	if (openResult.code !== 0) {
 		const errorMessage = openResult.stderr?.trim() || `Failed to open diff for ${target.displayPath}`;
 		ctx.ui.notify(errorMessage, "error");
@@ -843,7 +883,7 @@ const showFileSelector = async (
 	ctx: ExtensionContext,
 	files: FileEntry[],
 	selectedPath?: string | null,
-	gitRoot?: string | null,
+	repository?: Repository | null,
 ): Promise<{ selected: FileEntry | null; quickAction: "diff" | null }> => {
 	const items: SelectItem[] = files.map((file) => {
 		const directoryLabel = file.isDirectory ? " [directory]" : "";
@@ -925,7 +965,7 @@ const showFileSelector = async (
 					const selected = selectList?.getSelectedItem();
 					if (selected) {
 						const file = files.find((entry) => entry.canonicalPath === selected.value);
-						const canDiff = file?.isTracked && !file.isDirectory && Boolean(gitRoot);
+						const canDiff = file?.isTracked && !file.isDirectory && Boolean(repository);
 						if (!canDiff) {
 							ctx.ui.notify("Diff is only available for tracked files", "warning");
 							return;
@@ -968,7 +1008,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		return;
 	}
 
-	const { files, gitRoot } = await buildFileEntries(pi, ctx);
+	const { files, repository } = await buildFileEntries(pi, ctx);
 	if (files.length === 0) {
 		ctx.ui.notify("No files found", "info");
 		return;
@@ -976,7 +1016,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	let lastSelectedPath: string | null = null;
 	while (true) {
-		const { selected, quickAction } = await showFileSelector(ctx, files, lastSelectedPath, gitRoot);
+		const { selected, quickAction } = await showFileSelector(ctx, files, lastSelectedPath, repository);
 		if (!selected) {
 			ctx.ui.notify("Files cancelled", "info");
 			return;
@@ -986,10 +1026,10 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 		const canQuickLook = process.platform === "darwin" && !selected.isDirectory;
 		const editCheck = getEditableContent(selected);
-		const canDiff = selected.isTracked && !selected.isDirectory && Boolean(gitRoot);
+		const canDiff = selected.isTracked && !selected.isDirectory && Boolean(repository);
 
 		if (quickAction === "diff") {
-			await openDiff(pi, ctx, selected, gitRoot);
+			await openDiff(pi, ctx, selected, repository);
 			continue;
 		}
 
@@ -1020,7 +1060,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				addFileToPrompt(ctx, selected);
 				break;
 			case "diff":
-				await openDiff(pi, ctx, selected, gitRoot);
+				await openDiff(pi, ctx, selected, repository);
 				break;
 			default:
 				await revealPath(pi, ctx, selected);
@@ -1031,7 +1071,7 @@ const runFileBrowser = async (pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("files", {
-		description: "Browse files with git status and session references",
+		description: "Browse files with repository status and session references",
 		handler: async (_args, ctx) => {
 			await runFileBrowser(pi, ctx);
 		},
