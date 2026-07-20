@@ -317,12 +317,17 @@ function pickFastModel(provider, requestedModel, piAi) {
 
 	const preferredIds =
 		provider === "openai-codex"
-			? ["gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.3-codex-spark", "gpt-5.1", "gpt-5.1-codex-mini"]
+			? ["gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.1", "gpt-5.1-codex-mini"]
 			: ["claude-haiku-4-5", "claude-3-5-haiku-latest", "claude-3-5-haiku-20241022"];
 
 	for (const id of preferredIds) {
 		const found = models.find((m) => m.id === id);
 		if (found) return found;
+
+	// pi-ai's built-in registry can lag models configured in Pi's models.json.
+	// Keep the configured Codex default instead of falling through to an older
+	// bundled fast model.
+	if (provider === "openai-codex") return { ...models[0], id: "gpt-5.6-luna" };
 	}
 
 	const heuristic = models.find((m) => /mini|haiku|spark|flash|fast/i.test(m.id));
